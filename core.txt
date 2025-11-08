@@ -1,0 +1,746 @@
+import requests
+import os
+import random
+import time
+import json
+import logging
+import uuid
+import base64
+import threading
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, request, send_from_directory, Response
+from werkzeug.utils import secure_filename, safe_join
+from flask_cors import CORS
+from instagrapi import Client
+from instagrapi.exceptions import TwoFactorRequired, LoginRequired, ClientError, UserNotFound, PrivateError
+from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app)
+
+RATE_LIMIT_STATE = {
+    "is_limited": False,
+    "limited_until": 0,
+    "cool_down_period_seconds": 600 # Increased from 300 to 600 seconds for longer cooldown
+}
+
+background_tasks = {
+    "dm": {
+        "thread": None,
+        "stop_event": threading.Event(),
+        "status": { "running": False, "sent": 0, "failed": 0, "start_time": None, "message": "" }
+    },
+    "interaction": {
+        "thread": None,
+        "stop_event": threading.Event(),
+        "status": { "running": False, "liked": 0, "commented": 0, "start_time": None, "message": "" }
+    }
+}
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your_gemini_api_key_here")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+SETTINGS_FILE = "settings.json"
+SESSION_FILE = "session.json"
+DM_LOG_FILE = "dm_log.json"
+USED_FOLDER = "used"
+PHOTO_FOLDER = "photo"
+REELS_FOLDER = "reels"
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'mp4', 'mov'}
+captcha_store = {}
+
+for folder in [PHOTO_FOLDER, REELS_FOLDER, USED_FOLDER]:
+    os.makedirs(folder, exist_ok=True)
+
+DEFAULT_SETTINGS = {
+    "caption_prompt": """شما نقش: تولیدکننده ی کپشن تبلیغاتی حرفه ای برای پست های اینستاگرامی یک ربات فروش فیلترشکن به نام "اکسپرس" را ایفا می کنید.
+هدف: تولید یک کپشن اینستاگرامی کوتاه, جذاب, ترغبی و بهینه سازی شده برای افزایش فروش.
+- خروجی **فقط یک رشته متن** (string) باشد.
+- از اموجی های جذاب و حرفه ای استفاده کنید.
+- بین هر خط کپشن **یک خط فاصله** قرار گیرد.
+- هر بار **یک کپشن جدید, متفاوت و خلاقانه** تولید کنید.
+- روی ویژگی های کلیدی فیلترشکن (سرعت بالا, امنیت, پایداری, پشتیبانی ۲۴/۷) تاکید کنید.
+- در پایان کپشن **دعوت به اقدام (CTA)** قوی قرار گیرد.
+- نام ربات **اکسپرس** را در متن بیاورید.
+- در انتهای کپشن حدود ۶ الی ۱۰ هشتگ مرتبط و بهینه درج گردد.
+""",
+    "dm_prompt": """
+شما یک تولید کننده متن تبلیغاتی حرفه ای برای خرید فیلترشکن های اکسپرس و ویتوری هستید. هدف شما تولید متنی است که کاربران اینستاگرام را به خرید ترغیب کند. متن شما باید شامل ایموجی های جذاب و CTA (Call to Action) قوی باشد.
+دستورالعمل ها:
+1. متنی جذاب با استفاده از ایموجی های مرتبط ایجاد کنید.
+2. مزایای فیلترشکن ها را به طور خلاقه بیان کنید.
+3. یک CTA قوی در انتهای متن قرار دهید.
+4. از لحنی دوستانه و صمیمی استفاده کنید.
+5. در انتهای پیام, حتماً یک **لینک مستقیم قابل کلیک** https://t.me/ExpresetBot?start=hello قرار دهید و آن را با ایموجی هایی مانند ⭐ یا 🚀 برجسته کنید.
+محدودیت ها:
+- متن نباید بیش از حد طولانی باشد.
+- از ادعاهای نادرست یا گمراه کننده خودداری کنید.
+فرمت خروجی:
+یک پاراگراف متن تبلیغاتی جذاب با ایموجی های مرتبط و CTA قوی در انتها.
+""",
+    "interaction_hashtags": ["فیلترشکن", "وی_پی_ان", "اینترنت_آزاد", "تکنولوژی", "امنیت_سایبری", "فناوری_اطلاعات", "پروکسی", "اینترنت", "فیلترینگ", "vpn"],
+    "interaction_comments": ["عالی بود! 👏", "چه پست خوبی!", "موفق باشید 🚀", "لذت بردم 👍", "محتوای جالبی بود."]
+}
+
+def save_settings(data):
+    try:
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logging.error(f"Failed to save settings: {e}")
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        save_settings(DEFAULT_SETTINGS)
+        return DEFAULT_SETTINGS
+    try:
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            settings_data = json.load(f)
+        updated = False
+        for key, default_value in DEFAULT_SETTINGS.items():
+            if key not in settings_data:
+                settings_data[key] = default_value
+                updated = True
+        if updated:
+            save_settings(settings_data)
+        return settings_data
+    except Exception as e:
+        logging.error(f"Error loading settings, using defaults. Error: {e}")
+        save_settings(DEFAULT_SETTINGS)
+        return DEFAULT_SETTINGS
+
+settings = load_settings()
+
+def get_client() -> Client | None:
+    cl = Client()
+    if os.path.exists(SESSION_FILE):
+        try:
+            cl.load_settings(SESSION_FILE)
+            if cl.user_id:
+                return cl
+        except Exception as e:
+            # Do not delete the session file on a loading error. This prevents
+            # unnecessary logouts due to benign errors or temporary issues.
+            # A new successful login will overwrite the file anyway.
+            logging.warning(f"Could not load session file. Error: {e}")
+    return None
+
+def load_dm_log() -> dict:
+    if not os.path.exists(DM_LOG_FILE): return {}
+    try:
+        with open(DM_LOG_FILE, 'r', encoding='utf-8') as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    except Exception as e:
+        logging.error(f"Failed to load DM log: {e}")
+        return {}
+
+def save_dm_log(dm_log: dict):
+    try:
+        with open(DM_LOG_FILE, 'w', encoding='utf-8') as f:
+            json.dump({str(k): v for k, v in dm_log.items()}, f, indent=4)
+    except Exception as e:
+        logging.error(f"Failed to save DM log: {e}")
+
+def get_recent_commenters(cl: Client) -> set:
+    user_pks = set()
+    try:
+        medias = cl.user_medias_v1(cl.user_id, amount=3) 
+        for media in medias:
+            media_taken_at = getattr(media, "taken_at", datetime.min)
+            if media_taken_at.tzinfo is None:
+                comparison_date = datetime.now() - timedelta(days=1)
+            else:
+                comparison_date = datetime.now(media_taken_at.tzinfo) - timedelta(days=1)
+
+            if media_taken_at > comparison_date:
+                comments = cl.media_comments(media.pk, amount=20)
+                user_pks.update(int(c.user.pk) for c in comments)
+            if len(user_pks) >= 20: break
+    except Exception as e:
+        logging.error(f"Error getting recent commenters: {e}")
+    return user_pks
+
+def get_recent_likers(cl: Client) -> set:
+    user_pks = set()
+    try:
+        medias = cl.user_medias_v1(cl.user_id, amount=2) 
+        for media in medias:
+            likers = cl.media_likers(media.pk)
+            user_pks.update(int(u.pk) for u in likers)
+            if len(user_pks) >= 20: break
+    except Exception as e:
+        logging.error(f"Error getting recent likers: {e}")
+    return user_pks
+
+def get_target_users_for_dm(cl: Client, target: str, dm_log: dict) -> list:
+    user_pks = set()
+    if target == 'random_contacts':
+        logging.info("Collecting random followers and followings...")
+        try:
+            followers = cl.user_followers_v1(cl.user_id, amount=20)
+            user_pks.update(int(u.pk) for u in followers)
+        except Exception as e:
+            logging.error(f"Error fetching followers for DM: {e}")
+        try:
+            followings = cl.user_following_v1(cl.user_id, amount=20)
+            user_pks.update(int(u.pk) for u in followings)
+        except Exception as e:
+            logging.error(f"Error fetching followings for DM: {e}")
+    elif target == 'smart_engagers':
+        logging.info("Collecting recent likers and commenters...")
+        user_pks.update(get_recent_commenters(cl))
+        user_pks.update(get_recent_likers(cl))
+    
+    logged_pks = set(dm_log.keys())
+    my_pk = int(cl.user_id)
+    new_targets = [pk for pk in user_pks if pk not in logged_pks and pk != my_pk]
+    
+    logging.info(f"Found {len(user_pks)} potential targets. After filtering, {len(new_targets)} new targets remain.")
+    
+    random.shuffle(new_targets)
+    sample_size = min(1, len(new_targets))
+    selected_targets = random.sample(new_targets, sample_size)
+    
+    logging.info(f"Selected {len(selected_targets)} targets for this batch.")
+    return selected_targets
+
+def generate_captcha():
+    num1, num2 = random.randint(1, 9), random.randint(1, 9)
+    svg = f"""<svg width="150" height="50" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#f0f0f0"/><text x="50%" y="50%" font-family="monospace" font-size="24" fill="#333" text-anchor="middle" dominant-baseline="middle">{num1} + {num2}</text><line x1="{random.randint(5,25)}" y1="{random.randint(5,45)}" x2="{random.randint(125,145)}" y2="{random.randint(5,45)}" stroke="#bbb" stroke-width="2"/></svg>"""
+    return f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}", str(num1 + num2)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def get_file_list(folder):
+    try: return sorted([f for f in os.listdir(folder) if not f.startswith('.') and allowed_file(f)])
+    except: return []
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def api_settings():
+    global settings
+    if request.method == 'GET':
+        return jsonify(load_settings())
+    data = request.get_json()
+    save_settings(data)
+    settings = data
+    return jsonify({"success": True, "message": "تنظیمات با موفقیت ذخیره شد."})
+
+@app.route('/api/captcha', methods=['GET'])
+def api_captcha():
+    captcha_id = str(uuid.uuid4())
+    image, answer = generate_captcha()
+    captcha_store[captcha_id] = {'answer': answer, 'timestamp': time.time()}
+    return jsonify({"id": captcha_id, "image": image})
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.get_json()
+    username, password, captcha_id, captcha_solution, code = data.get('username'), data.get('password'), data.get('captcha_id'), data.get('captcha_solution'), data.get('code')
+
+    if not all([username, password, captcha_id, captcha_solution]):
+        return jsonify({"success": False, "message": "تمام فیلدها الزامی هستند."}), 400
+    
+    challenge = captcha_store.get(captcha_id)
+    if not challenge or (time.time() - challenge['timestamp'] > 300):
+        return jsonify({"success": False, "message": "کپچا منقضی شده است. لطفاً صفحه را رفرش کنید."}), 400
+    if challenge['answer'] != captcha_solution:
+        return jsonify({"success": False, "message": "پاسخ سوال امنیتی (کپچا) اشتباه است."}), 400
+    if captcha_id in captcha_store: del captcha_store[captcha_id]
+
+    cl = Client()
+    if os.path.exists(SESSION_FILE):
+        os.remove(SESSION_FILE)
+
+    try:
+        cl.login(username, password, verification_code=code)
+        cl.dump_settings(SESSION_FILE)
+        return jsonify({"success": True, "message": "ورود موفقیت‌آمیز."})
+    except TwoFactorRequired:
+        return jsonify({"success": False, "two_factor": True, "message": "کد تایید دو مرحله‌ای نیاز است."})
+    except LoginRequired:
+        return jsonify({"success": False, "message": "نام کاربری یا رمز عبور اشتباه است."}), 401
+    except ClientError as e:
+        msg, status_code = str(e), 400
+        logging.error(f"ClientError during login for {username}: {msg}")
+        if "feedback_required" in msg:
+            msg, status_code = "اکانت شما توسط اینستاگرام محدود شده است. لطفاً ۲۴ ساعت صبر کرده و دوباره تلاش کنید.", 403
+        elif hasattr(e, 'response') and e.response and e.response.status_code == 429:
+            msg, status_code = "تعداد درخواست‌ها بیش از حد مجاز است. لطفاً چند دقیقه صبر کرده و دوباره امتحان کنید.", 429
+        elif "checkpoint_required" in msg:
+            msg = "ورود مشکوک شناسایی شد. لطفاً اپلیکیشن اینستاگرام یا ایمیل خود را برای تایید هویت بررسی کرده و سپس مجدداً وارد شوید."
+        elif "challenge_required" in msg:
+            msg = "challenge_required"
+        return jsonify({"success": False, "message": msg}), status_code
+    except Exception as e:
+        logging.error(f"Unexpected error during login for {username}: {e}", exc_info=True)
+        return jsonify({"success": False, "message": f"یک خطای پیش‌بینی نشده رخ داد: {e}"}), 500
+
+@app.route('/api/logout', methods=['POST'])
+def api_logout():
+    if os.path.exists(SESSION_FILE): os.remove(SESSION_FILE)
+    return jsonify({"success": True, "message": "با موفقیت خارج شدید."})
+
+@app.route('/api/stats', methods=['GET'])
+def api_stats():
+    global RATE_LIMIT_STATE
+    if RATE_LIMIT_STATE["is_limited"] and time.time() < RATE_LIMIT_STATE["limited_until"]:
+        return jsonify({"logged_in": True, "rate_limited": True, "limited_until": RATE_LIMIT_STATE["limited_until"]})
+    cl = get_client()
+    if not cl: return jsonify({"logged_in": False})
+    try:
+        info = cl.user_info_v1(cl.user_id)
+        RATE_LIMIT_STATE["is_limited"] = False
+        return jsonify({
+            "logged_in": True, "rate_limited": False, "username": info.username, "full_name": info.full_name,
+            "followers": info.follower_count, "following": info.following_count, "posts": info.media_count,
+            "tasks": {task: state["status"]["running"] for task, state in background_tasks.items()}
+        })
+    except KeyError as e:
+        if 'pinned_channels_info' in str(e):
+            logging.warning(f"Caught benign KeyError in api_stats, returning partial data to avoid logout: {e}")
+            # This error can happen with stale sessions but doesn't mean the session is fully invalid.
+            # Return basic info from the session file to keep the user logged in, but indicate stats are unavailable.
+            return jsonify({
+                "logged_in": True, "rate_limited": False,
+                "username": getattr(cl, 'username', '...'),
+                "full_name": getattr(cl, 'full_name', '...'),
+                "followers": "N/A", "following": "N/A", "posts": "N/A",
+                "tasks": {task: state["status"]["running"] for task, state in background_tasks.items()}
+            })
+        else:
+            logging.error(f"Caught unexpected KeyError in api_stats, logging out: {e}")
+            if os.path.exists(SESSION_FILE): os.remove(SESSION_FILE)
+            return jsonify({"logged_in": False})
+    except ClientError as e:
+        error_message = str(e).lower()
+        if "feedback_required" in error_message or "user not found" in error_message or "privateerror" in error_message:
+            logging.warning(f"ClientError detected, likely rate-limited or account issue: {e}. Activating cooldown.")
+            RATE_LIMIT_STATE.update({"is_limited": True, "limited_until": time.time() + RATE_LIMIT_STATE['cool_down_period_seconds']})
+            if os.path.exists(SESSION_FILE): os.remove(SESSION_FILE)
+            return jsonify({"logged_in": False, "rate_limited": True, "limited_until": RATE_LIMIT_STATE["limited_until"]})
+        if os.path.exists(SESSION_FILE): os.remove(SESSION_FILE)
+        return jsonify({"logged_in": False})
+    except Exception as e:
+        logging.error(f"Caught unexpected Exception in api_stats, logging out: {e}")
+        if os.path.exists(SESSION_FILE): os.remove(SESSION_FILE)
+        return jsonify({"logged_in": False})
+
+@app.route('/api/profile_pic')
+def profile_pic_proxy():
+    cl = get_client()
+    if not cl:
+        return "Not logged in", 401
+    try:
+        info = cl.user_info_v1(cl.user_id)
+        pic_url = str(info.profile_pic_url)
+        response = requests.get(pic_url, stream=True, timeout=5)
+        response.raise_for_status()
+        return Response(response.iter_content(chunk_size=4096), content_type=response.headers['Content-Type'])
+    except Exception as e:
+        logging.error(f"Error proxying profile picture: {e}")
+        return "Error fetching image", 500
+
+@app.route('/api/generate_caption', methods=['POST'])
+def api_generate_caption():
+    is_dm = request.get_json().get('is_dm', False)
+    system_prompt = settings['dm_prompt'] if is_dm else settings['caption_prompt']
+    payload = {"contents": [{"parts": [{"text": "یک نمونه بر اساس دستورالعمل‌ها تولید کن."}]}], "systemInstruction": {"parts": [{"text": system_prompt}]}}
+    try:
+        response = requests.post(GEMINI_API_URL, params={"key": GEMINI_API_KEY}, json=payload)
+        response.raise_for_status()
+        caption = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+        return jsonify({"success": True, "caption": caption})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"خطا در ارتباط با هوش مصنوعی: {e}"}), 500
+
+@app.route('/api/send_dm', methods=['POST'])
+def api_send_dm():
+    if background_tasks['dm']['status']['running']:
+        return jsonify({"success": False, "message": "عملیات ارسال دایرکت در حال حاضر فعال است."}), 409
+    data = request.get_json()
+    message, target = data.get('message'), data.get('target')
+    if not message or target not in ['smart_engagers', 'random_contacts']:
+        return jsonify({"success": False, "message": "درخواست نامعتبر."}), 400
+    
+    status = background_tasks['dm']['status']
+    status.update({"running": True, "sent": 0, "failed": 0, "start_time": time.time(), "message": "در حال آماده‌سازی..."})
+    background_tasks['dm']['stop_event'].clear()
+    thread = threading.Thread(target=dm_sending_thread, args=(message, target, background_tasks['dm']['stop_event']))
+    background_tasks['dm']['thread'] = thread
+    thread.start()
+    return jsonify({"success": True, "message": "عملیات ارسال دایرکت‌ها آغاز شد."})
+
+@app.route('/api/dm_status', methods=['GET'])
+def api_dm_status():
+    return jsonify(background_tasks['dm']['status'])
+
+@app.route('/api/cancel_task', methods=['POST'])
+def api_cancel_task():
+    task_name = request.get_json().get('task')
+    if task_name in background_tasks:
+        task = background_tasks[task_name]
+        if task['status']['running']:
+            task['stop_event'].set()
+            return jsonify({"success": True, "message": f"دستور توقف برای '{task_name}' ارسال شد."})
+        return jsonify({"success": False, "message": "عملیات فعال نبود."}), 404
+    return jsonify({"success": False, "message": "عملیات نامعتبر."}), 400
+
+@app.route('/api/post_media', methods=['POST'])
+def api_post_media():
+    data = request.get_json()
+    filename, caption, media_type = data.get('filename'), data.get('caption'), data.get('type')
+    if not all([filename, media_type]) or media_type not in ['photo', 'reel']:
+        return jsonify({"success": False, "message": "درخواست نامعتبر."}), 400
+    folder = PHOTO_FOLDER if media_type == 'photo' else REELS_FOLDER
+    filepath = safe_join(folder, secure_filename(filename))
+    if not os.path.exists(filepath):
+        return jsonify({"success": False, "message": "فایل یافت نشد."}), 404
+    
+    cl = get_client()
+    if not cl: return jsonify({"success": False, "message": "نشست ورود یافت نشد."}), 401
+    try:
+        # Introduce a small random delay before posting to mimic human behavior
+        time.sleep(random.uniform(5, 15)) 
+        if media_type == 'photo': cl.photo_upload(filepath, caption)
+        elif media_type == 'reel': cl.clip_upload(filepath, caption)
+        os.rename(filepath, safe_join(USED_FOLDER, os.path.basename(filepath)))
+        return jsonify({"success": True, "message": f"'{os.path.basename(filepath)}' با موفقیت ارسال شد."})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/api/files', methods=['GET'])
+def api_files():
+    return jsonify({"photos": get_file_list(PHOTO_FOLDER), "reels": get_file_list(REELS_FOLDER)})
+
+@app.route('/api/upload_file', methods=['POST'])
+def api_upload_file():
+    if 'file' not in request.files: return jsonify({"success": False, "message": "فایلی ارسال نشده."}), 400
+    file, file_type = request.files['file'], request.form.get('type')
+    if file.filename == '' or not file_type or file_type not in ['photo', 'reel'] or not allowed_file(file.filename):
+        return jsonify({"success": False, "message": "درخواست یا فرمت فایل نامعتبر است."}), 400
+    
+    filename = secure_filename(file.filename)
+    folder = PHOTO_FOLDER if file_type == 'photo' else REELS_FOLDER
+    if os.path.exists(safe_join(USED_FOLDER, filename)) or os.path.exists(safe_join(folder, filename)):
+        return jsonify({"success": False, "message": "فایلی با این نام وجود دارد یا قبلاً استفاده شده."}), 409
+    try:
+        file.save(safe_join(folder, filename))
+        return jsonify({"success": True, "message": f"فایل '{filename}' با موفقیت آپلود شد."})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"خطا در ذخیره فایل: {e}"}), 500
+
+@app.route('/api/delete_file', methods=['POST'])
+def api_delete_file():
+    data = request.get_json()
+    filename, file_type = data.get('filename'), data.get('type')
+    if not filename or not file_type or file_type not in ['photo', 'reel']:
+        return jsonify({"success": False, "message": "درخواست نامعتبر."}), 400
+    folder = PHOTO_FOLDER if file_type == 'photo' else REELS_FOLDER
+    filepath = safe_join(folder, secure_filename(filename))
+    if not os.path.exists(filepath): return jsonify({"success": False, "message": "فایل پیدا نشد."}), 404
+    try:
+        os.remove(filepath)
+        return jsonify({"success": True, "message": f"فایل '{filename}' حذف شد."})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"خطا در حذف فایل: {e}"}), 500
+
+@app.route(f'/{PHOTO_FOLDER}/<path:filename>')
+def serve_photo(filename):
+    return send_from_directory(os.path.abspath(PHOTO_FOLDER), filename)
+
+@app.route(f'/{REELS_FOLDER}/<path:filename>')
+def serve_reel(filename):
+    return send_from_directory(os.path.abspath(REELS_FOLDER), filename)
+
+@app.route('/api/auto_engage', methods=['POST'])
+def api_auto_engage():
+    if background_tasks['interaction']['status']['running']:
+        return jsonify({"success": False, "message": "عملیات تعامل هوشمند فعال است."}), 409
+    target = request.get_json().get('target')
+    if target not in ['followers', 'discover']:
+        return jsonify({"success": False, "message": "هدف نامعتبر است."}), 400
+    
+    status = background_tasks['interaction']['status']
+    status.update({"running": True, "liked": 0, "commented": 0, "start_time": time.time(), "message": "در حال آماده‌سازی..."})
+    background_tasks['interaction']['stop_event'].clear()
+    thread = threading.Thread(target=auto_engage_thread, args=(target, background_tasks['interaction']['stop_event']))
+    background_tasks['interaction']['thread'] = thread
+    thread.start()
+    return jsonify({"success": True, "message": "عملیات تعامل هوشمند آغاز شد."})
+
+@app.route('/api/interaction_status', methods=['GET'])
+def api_interaction_status():
+    return jsonify(background_tasks['interaction']['status'])
+
+def dm_sending_thread(message, target, stop_event):
+    status = background_tasks['dm']['status']
+    dm_log = {}
+    try:
+        cl = get_client()
+        if not cl: raise LoginRequired("Client session not found.")
+        dm_log = load_dm_log()
+
+        initial_delay = random.uniform(30, 90)
+        logging.info(f"DM thread starting after an initial delay of {initial_delay:.2f} seconds.")
+        stop_event.wait(initial_delay)
+        if stop_event.is_set(): return
+
+        while not stop_event.is_set():
+            status['message'] = "در حال جستجوی اهداف جدید..."
+            try:
+                fetch_delay = random.uniform(5, 15)
+                stop_event.wait(fetch_delay)
+                if stop_event.is_set(): break
+
+                target_pks = get_target_users_for_dm(cl, target, dm_log)
+            except Exception as e:
+                status['message'] = f"خطا در یافتن اهداف: {e}. تلاش مجدد..."
+                stop_event.wait(random.uniform(30, 60))
+                continue
+            
+            if not target_pks:
+                status['message'] = "هدف جدیدی یافت نشد. انتظار برای شروع مجدد..."
+                stop_event.wait(random.uniform(60, 180))
+                continue
+
+            for user_pk in target_pks:
+                if stop_event.is_set(): break
+                try:
+                    username = cl.user_info_v1(user_pk).username 
+                    status['message'] = f"در حال ارسال به @{username}..."
+                    
+                    delay_before_send = random.uniform(120, 300) # 2-5 minutes delay
+                    logging.info(f"Waiting {delay_before_send:.2f} seconds before sending DM to {username}...")
+                    stop_event.wait(delay_before_send)
+                    if stop_event.is_set(): break
+
+                    cl.direct_send(message.replace('{username}', username), user_ids=[int(user_pk)])
+                    dm_log[int(user_pk)] = {'timestamp': datetime.now().isoformat()}
+                    status['sent'] += 1
+                    status['message'] = f"پیام ارسال شد به @{username}. انتظار برای گام بعدی..."
+                    
+                    post_send_delay = random.uniform(5, 15)
+                    stop_event.wait(post_send_delay)
+
+                except (UserNotFound, PrivateError):
+                    status['failed'] += 1
+                    logging.warning(f"Skipping user {user_pk} (not found or private).")
+                    stop_event.wait(random.uniform(10, 20))
+                except ClientError as e:
+                    status['failed'] += 1
+                    logging.error(f"ClientError while sending DM to {user_pk}: {e}")
+                    if getattr(e, 'response', None) and getattr(e.response, 'status_code', 0) in [429, 400, 403] or "feedback_required" in str(e).lower():
+                        status['message'] = "خطای اینستاگرام (محدودیت). عملیات متوقف شد."
+                        stop_event.set()
+                        RATE_LIMIT_STATE.update({"is_limited": True, "limited_until": time.time() + RATE_LIMIT_STATE['cool_down_period_seconds']})
+                        logging.warning("DM thread hit API limit, activating global cooldown.")
+                    stop_event.wait(random.uniform(30, 90))
+                except Exception as e:
+                    status['failed'] += 1
+                    logging.error(f"Generic error sending DM to {user_pk}: {e}")
+                    stop_event.wait(random.uniform(20, 40))
+            
+            if not stop_event.is_set(): save_dm_log(dm_log)
+            if not stop_event.is_set() and len(target_pks) > 0:
+                batch_cooldown = random.uniform(60, 180)
+                status['message'] = f"دسته پیام‌ها ارسال شد. انتظار برای {batch_cooldown:.2f} ثانیه قبل از جستجوی جدید..."
+                stop_event.wait(batch_cooldown)
+
+    except Exception as e:
+        status['message'] = f"خطای بحرانی در ترد دایرکت: {e}"
+        logging.error(f"Critical error in DM thread: {e}", exc_info=True)
+        RATE_LIMIT_STATE.update({"is_limited": True, "limited_until": time.time() + RATE_LIMIT_STATE['cool_down_period_seconds']})
+        logging.warning("DM thread encountered critical error, activating global cooldown.")
+    finally:
+        save_dm_log(dm_log)
+        status.update({"running": False, "message": "عملیات متوقف شد."})
+        logging.info("DM thread stopped.")
+
+def simulate_human_activity(cl: Client, stop_event: threading.Event, status: dict):
+    activities = ["feed_timeline", "discover_feed", "user_info"]
+    chosen_activity = random.choice(activities)
+    
+    try:
+        if chosen_activity == "feed_timeline":
+            duration = random.uniform(15, 45)
+            status['message'] = "شبیه‌سازی گشت و گذار در فید اصلی..."
+            logging.info(f"Simulating human activity: Browsing main feed for {duration:.2f}s.")
+            cl.feed_timeline(amount=1)
+            stop_event.wait(duration)
+
+        elif chosen_activity == "discover_feed":
+            duration = random.uniform(20, 50)
+            status['message'] = "شبیه‌سازی گشت و گذار در اکسپلور..."
+            logging.info(f"Simulating human activity: Browsing explore feed for {duration:.2f}s.")
+            cl.explore_v1()
+            stop_event.wait(duration)
+
+        elif chosen_activity == "user_info":
+            duration = random.uniform(10, 30)
+            status['message'] = "شبیه‌سازی بازدید از یک پروفایل..."
+            users = cl.user_followers_v1(cl.user_id, amount=5)
+            if users:
+                target_user = random.choice(users)
+                logging.info(f"Simulating human activity: Viewing profile of {target_user.username} for {duration:.2f}s.")
+                cl.user_info_v1(target_user.pk)
+                stop_event.wait(duration)
+            else:
+                logging.info("Simulating human activity: Could not find a target profile to view, just waiting.")
+                stop_event.wait(duration)
+    except Exception as e:
+        logging.warning(f"Minor error during human activity simulation ({chosen_activity}): {e}")
+        stop_event.wait(random.uniform(15, 30))
+
+
+def auto_engage_thread(target, stop_event):
+    status = background_tasks['interaction']['status']
+    try:
+        cl = get_client()
+        if not cl: raise LoginRequired("Client session not found.")
+        
+        initial_delay = random.uniform(20, 60)
+        logging.info(f"Interaction thread starting after an initial delay of {initial_delay:.2f} seconds.")
+        stop_event.wait(initial_delay)
+        if stop_event.is_set(): return
+
+        last_break_time = time.time()
+
+        while not stop_event.is_set():
+            if time.time() - last_break_time > 600:
+                break_duration = random.uniform(240, 420)  # 4-7 minute break
+                status['message'] = f"وقفه استراحت برنامه‌ریزی شده برای {break_duration / 60:.1f} دقیقه..."
+                logging.info(f"Interaction work cycle complete. Taking a {break_duration:.2f} second break.")
+                stop_event.wait(break_duration)
+                last_break_time = time.time()
+                if stop_event.is_set(): break
+                status['message'] = "ادامه عملیات تعامل..."
+                logging.info("Interaction break finished. Resuming.")
+
+            status['message'] = "در حال جستجوی پست‌های جدید برای تعامل..."
+            final_targets = []
+            try:
+                fetch_delay = random.uniform(5, 10)
+                stop_event.wait(fetch_delay)
+                if stop_event.is_set(): break
+
+                if target == 'followers':
+                    users = cl.user_followers_v1(cl.user_id, amount=20) 
+                    random.shuffle(users)
+                    for user in users[:min(len(users), 5)]:
+                        if stop_event.is_set(): break
+                        try:
+                            user_medias = cl.user_medias_v1(user.pk, amount=1)
+                            if user_medias and not getattr(user_medias[0], "has_liked", False):
+                                final_targets.append(user_medias[0])
+                        except (UserNotFound, PrivateError):
+                            logging.warning(f"Skipping follower {user.username} (not found or private).")
+                        except Exception as e:
+                            logging.error(f"Error fetching media for user {user.pk}, skipping: {e}")
+                        stop_event.wait(random.uniform(3, 7))
+                elif target == 'discover':
+                    if settings.get('interaction_hashtags'):
+                        hashtag = random.choice(settings.get('interaction_hashtags'))
+                        medias = cl.hashtag_medias_v1(hashtag, amount=15, tab_key='recent') 
+                        final_targets.extend([m for m in medias if not getattr(m, "has_liked", False)])
+                    stop_event.wait(random.uniform(5, 10))
+
+            except (ClientError, Exception) as e:
+                if isinstance(e, LoginRequired) or "login_required" in str(e).lower():
+                    status['message'] = "نشست ورود نامعتبر است. لطفاً دوباره وارد شوید."
+                    logging.error(f"LoginRequired error detected while fetching targets: {e}. Stopping thread and deleting session.")
+                    if os.path.exists(SESSION_FILE):
+                        os.remove(SESSION_FILE)
+                    stop_event.set()
+                else:
+                    error_message = f"خطا در یافتن پست‌ها. استراحت برای ۱ دقیقه..."
+                    status['message'] = error_message
+                    logging.error(f"Error while fetching media targets: {e}")
+                    stop_event.wait(60)
+                    logging.info("Cooldown finished. Retrying fetch.")
+                continue
+            
+            if not final_targets:
+                status['message'] = "پست جدیدی یافت نشد. در حال انتظار..."
+                stop_event.wait(random.uniform(60, 180))
+                continue
+            
+            batch_size = random.randint(3, 5)
+            selected_medias = random.sample(final_targets, min(len(final_targets), batch_size))
+            status['message'] = f"دسته جدیدی با {len(selected_medias)} پست پیدا شد."
+
+            for i, media in enumerate(selected_medias):
+                if stop_event.is_set(): break
+                try:
+                    action_type = 'like'
+                    if settings.get('interaction_comments') and random.choice([True, False]):
+                        action_type = 'comment'
+                    
+                    if action_type == 'like':
+                        status['message'] = f"در حال لایک پست {media.pk}..."
+                        cl.media_like(media.pk)
+                        status['liked'] += 1
+                    else:
+                        comment = random.choice(settings.get('interaction_comments'))
+                        status['message'] = f"در حال کامنت برای {media.pk}..."
+                        cl.media_comment(media.pk, comment)
+                        status['commented'] += 1
+                    
+                    delay = random.uniform(30, 90)
+                    status['message'] += f" انتظار برای {delay:.2f} ثانیه..."
+                    stop_event.wait(delay)
+
+                except (ClientError, Exception) as e:
+                    if isinstance(e, LoginRequired) or "login_required" in str(e).lower():
+                        status['message'] = "نشست ورود نامعتبر است. لطفاً دوباره وارد شوید."
+                        logging.error(f"LoginRequired error during media interaction: {e}. Stopping thread and deleting session.")
+                        if os.path.exists(SESSION_FILE):
+                            os.remove(SESSION_FILE)
+                        stop_event.set()
+                        break
+                    
+                    logging.error(f"Error during interaction on media {media.pk}: {e}")
+                    if getattr(e, 'response', None) and getattr(e.response, 'status_code', 0) in [429, 400, 403] or "feedback_required" in str(e).lower():
+                        status['message'] = "خطای اینستاگرام (محدودیت). عملیات متوقف شد."
+                        stop_event.set()
+                        RATE_LIMIT_STATE.update({"is_limited": True, "limited_until": time.time() + RATE_LIMIT_STATE['cool_down_period_seconds']})
+                        logging.warning("Interaction thread hit API limit, activating global cooldown.")
+                    stop_event.wait(random.uniform(30, 90))
+            
+            if not stop_event.is_set():
+                if random.random() < 0.4: # 40% chance of human-like distraction
+                    simulate_human_activity(cl, stop_event, status)
+                    if stop_event.is_set(): break
+
+                batch_cooldown = random.uniform(180, 360) # 3-6 minute delay between batches
+                status['message'] = f"دسته تعامل‌ها تمام شد. انتظار برای {batch_cooldown / 60:.1f} دقیقه..."
+                stop_event.wait(batch_cooldown)
+
+    except Exception as e:
+        status['message'] = f"خطای بحرانی در ترد تعامل: {e}"
+        logging.error(f"Critical error in interaction thread: {e}", exc_info=True)
+        RATE_LIMIT_STATE.update({"is_limited": True, "limited_until": time.time() + RATE_LIMIT_STATE['cool_down_period_seconds']})
+        logging.warning("Interaction thread encountered critical error, activating global cooldown.")
+    finally:
+        status.update({"running": False, "message": "عملیات متوقف شد."})
+        logging.info("Interaction thread stopped.")
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve(path):
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    else:
+        return send_from_directory(app.static_folder, 'index.html')
+
+if __name__ == '__main__':
+    # Running in debug mode for development (shows errors in browser)
+    # For production, you should use a proper WSGI server like gunicorn or waitress
+    # app.run(debug=True, host='0.0.0.0', port=5000)
+    
+    # Running without debug mode for a cleaner log
+    app.run(host='127.0.0.1', port=5000)

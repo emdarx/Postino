@@ -1,0 +1,5 @@
+{
+  "name": "Instagram Assistant",
+  "description": "A modern, glassmorphism-style dashboard for managing an Instagram account. It allows users to publish content (posts, reels), generate captions with AI, and send promotional direct messages.",
+  "requestFramePermissions": []
+}
