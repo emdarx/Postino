@@ -16,6 +16,23 @@ interface DashboardPageProps {
 
 type ActiveTab = 'dashboard' | 'publisher' | 'dm' | 'interaction' | 'settings';
 
+const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
+
+const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
+    let errorForFallback: any;
+    try {
+        const response = await fetch(`${API_URLS[0]}${path}`, options);
+        if (response.status < 500) {
+            return response;
+        }
+        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
+    } catch (error) {
+        errorForFallback = error;
+    }
+    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
+    return fetch(`${API_URLS[1]}${path}`, options);
+};
+
 const RateLimitBanner: React.FC<{ limitedUntil: number }> = ({ limitedUntil }) => {
     const [timeLeft, setTimeLeft] = useState('');
 
@@ -56,14 +73,22 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [cancellingTask, setCancellingTask] = useState<string | null>(null);
   const [avatarError, setAvatarError] = useState(false);
-  const profilePicUrl = 'http://127.0.0.1:5000/api/profile_pic';
+  const [profilePicUrl, setProfilePicUrl] = useState(`${API_URLS[0]}/api/profile_pic`);
+
+  const handleAvatarError = () => {
+      if (profilePicUrl.startsWith(API_URLS[0])) {
+          setProfilePicUrl(`${API_URLS[1]}/api/profile_pic`);
+      } else {
+          setAvatarError(true);
+      }
+  };
 
   const handleCancelTask = async (taskName: string) => {
     if (!window.confirm(`آیا از لغو عملیات '${taskName}' مطمئن هستید؟`)) return;
     
     setCancellingTask(taskName);
     try {
-        const response = await fetch('http://12.0.0.1:5000/api/cancel_task', {
+        const response = await fetchWithFailover('/api/cancel_task', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ task: taskName }),
@@ -136,7 +161,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
                 <img 
                     src={profilePicUrl} 
                     alt={userInfo.username} 
-                    onError={() => setAvatarError(true)}
+                    onError={handleAvatarError}
                     className="w-10 h-10 rounded-full object-cover border-2 border-cyan-500" 
                 />
             )}

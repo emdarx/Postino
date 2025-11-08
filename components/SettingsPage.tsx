@@ -12,6 +12,23 @@ interface SettingsPageProps {
   isRateLimited: boolean;
 }
 
+const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
+
+const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
+    let errorForFallback: any;
+    try {
+        const response = await fetch(`${API_URLS[0]}${path}`, options);
+        if (response.status < 500) {
+            return response;
+        }
+        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
+    } catch (error) {
+        errorForFallback = error;
+    }
+    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
+    return fetch(`${API_URLS[1]}${path}`, options);
+};
+
 const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
     const [settings, setSettings] = useState<Settings>({
         caption_prompt: '',
@@ -27,7 +44,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
         setIsLoading(true);
         setStatus(null);
         try {
-            const response = await fetch('http://127.0.0.1:5000/api/settings');
+            const response = await fetchWithFailover('/api/settings');
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || 'خطا در دریافت تنظیمات.');
             setSettings(data);
@@ -59,7 +76,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
                 interaction_comments: settings.interaction_comments.filter(c => c.trim() !== ''),
             };
 
-            const response = await fetch('http://127.0.0.1:5000/api/settings', {
+            const response = await fetchWithFailover('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),

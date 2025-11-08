@@ -2,6 +2,23 @@ import React, { useState, useEffect, useCallback } from 'react';
 import LoginPage from './components/LoginPage';
 import DashboardPage from './components/DashboardPage';
 
+const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
+
+const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
+    let errorForFallback: any;
+    try {
+        const response = await fetch(`${API_URLS[0]}${path}`, options);
+        if (response.status < 500) {
+            return response;
+        }
+        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
+    } catch (error) {
+        errorForFallback = error;
+    }
+    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
+    return fetch(`${API_URLS[1]}${path}`, options);
+};
+
 const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -11,7 +28,7 @@ const App: React.FC = () => {
 
   const updateStatus = useCallback(async () => {
     try {
-      const response = await fetch('https://amirhmz.pythonanywhere.com/api/stats');
+      const response = await fetchWithFailover('/api/stats');
       const data = await response.json();
 
       if (data.rate_limited) {
@@ -36,7 +53,7 @@ const App: React.FC = () => {
   const checkLoginStatusWithLoader = useCallback(async () => {
     setIsLoading(true);
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/stats');
+      const response = await fetchWithFailover('/api/stats');
       const data = await response.json();
       
       if (data.rate_limited) {
@@ -74,7 +91,7 @@ const App: React.FC = () => {
 
   const handleLogout = async () => {
     try {
-      await fetch('http://127.0.0.1:5000/api/logout', { method: 'POST' });
+      await fetchWithFailover('/api/logout', { method: 'POST' });
     } catch (error) {
       console.error("Failed to log out from server:", error);
     } finally {

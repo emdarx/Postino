@@ -1,7 +1,22 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Image as ImageIcon, Video, Send, Loader2, CheckCircle, AlertTriangle, Info, Upload, Trash2, XCircle, Sparkles, Rocket } from 'lucide-react';
 
-const API_BASE_URL = 'http://127.0.0.1:5000';
+const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
+
+const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
+    let errorForFallback: any;
+    try {
+        const response = await fetch(`${API_URLS[0]}${path}`, options);
+        if (response.status < 500) {
+            return response;
+        }
+        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
+    } catch (error) {
+        errorForFallback = error;
+    }
+    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
+    return fetch(`${API_URLS[1]}${path}`, options);
+};
 
 interface FileItemProps {
   filename: string;
@@ -12,9 +27,13 @@ interface FileItemProps {
   disabled: boolean;
 }
 
+const PHOTO_FOLDER = "photo";
+const REELS_FOLDER = "reels";
+
 const FileItem: React.FC<FileItemProps> = ({ filename, type, isSelected, onSelect, onDelete, disabled }) => {
   const ref = useRef<HTMLDivElement>(null);
   const [inView, setInView] = useState(false);
+  const [sourceUrl, setSourceUrl] = useState(`${API_URLS[0]}/${type === 'photo' ? PHOTO_FOLDER : REELS_FOLDER}/${filename}`);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -32,16 +51,20 @@ const FileItem: React.FC<FileItemProps> = ({ filename, type, isSelected, onSelec
     return () => observer.disconnect();
   }, []);
 
-  const fileUrl = `${API_BASE_URL}/${type === 'photo' ? PHOTO_FOLDER : REELS_FOLDER}/${filename}`;
+  const handleError = () => {
+    if (sourceUrl.startsWith(API_URLS[0])) {
+        setSourceUrl(`${API_URLS[1]}/${type === 'photo' ? PHOTO_FOLDER : REELS_FOLDER}/${filename}`);
+    }
+  };
 
   return (
     <div ref={ref} className="relative aspect-square group rounded-lg overflow-hidden bg-gray-200 dark:bg-gray-800">
       {inView ? (
         <>
           {type === 'photo' ? (
-            <img src={fileUrl} alt={filename} className="w-full h-full object-cover" loading="lazy" />
+            <img src={sourceUrl} onError={handleError} alt={filename} className="w-full h-full object-cover" loading="lazy" />
           ) : (
-            <video src={fileUrl} className="w-full h-full object-cover" muted playsInline />
+            <video src={sourceUrl} onError={handleError} className="w-full h-full object-cover" muted playsInline />
           )}
           <div
             onClick={disabled ? undefined : onSelect}
@@ -71,9 +94,6 @@ const FileItem: React.FC<FileItemProps> = ({ filename, type, isSelected, onSelec
   );
 };
 
-const PHOTO_FOLDER = "photo";
-const REELS_FOLDER = "reels";
-
 interface ContentPublisherProps {
     isRateLimited: boolean;
 }
@@ -102,7 +122,7 @@ const ContentPublisher: React.FC<ContentPublisherProps> = ({ isRateLimited }) =>
     setIsLoading(prev => ({ ...prev, library: true }));
     setStatus(null);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/files`);
+      const response = await fetchWithFailover(`/api/files`);
       const data = await response.json();
       if (!response.ok) throw new Error("خطا در دریافت لیست فایل‌ها.");
       setFiles({ photos: data.photos || [], reels: data.reels || [] });
@@ -141,65 +161,77 @@ const ContentPublisher: React.FC<ContentPublisherProps> = ({ isRateLimited }) =>
       formData.append('file', file);
       formData.append('type', fileType);
 
-      const xhr = new XMLHttpRequest();
-      const startTime = Date.now();
+      const performUpload = (urlIndex: number) => {
+          const xhr = new XMLHttpRequest();
+          const startTime = Date.now();
 
-      xhr.upload.addEventListener('progress', (e) => {
-          if (e.lengthComputable) {
-              const percentage = (e.loaded / e.total) * 100;
-              const elapsedSeconds = (Date.now() - startTime) / 1000;
-              const speed = e.loaded / elapsedSeconds; // bytes per second
-              const remainingBytes = e.total - e.loaded;
-              const remainingSeconds = speed > 0 ? remainingBytes / speed : Infinity;
-              
-              setUploadProgress({
-                  percentage,
-                  loaded: e.loaded,
-                  total: e.total,
-                  remaining: remainingSeconds === Infinity ? '...' : Math.round(remainingSeconds).toString(),
-              });
-          }
-      });
-
-      xhr.addEventListener('load', () => {
-          setIsLoading(prev => ({ ...prev, uploading: false }));
-          setUploadProgress(null);
-          if (fileInputRef.current) fileInputRef.current.value = "";
-
-          try {
-              if (xhr.status >= 200 && xhr.status < 300) {
-                  const data = JSON.parse(xhr.responseText);
-                  if (data.success) {
-                      setStatus({ type: 'success', text: data.message });
-                      fetchFiles();
-                  } else {
-                      throw new Error(data.message || 'خطا در آپلود فایل.');
-                  }
-              } else {
-                  const data = JSON.parse(xhr.responseText);
-                  throw new Error(data.message || `خطای سرور: ${xhr.status}`);
+          xhr.upload.addEventListener('progress', (e) => {
+              if (e.lengthComputable) {
+                  const percentage = (e.loaded / e.total) * 100;
+                  const elapsedSeconds = (Date.now() - startTime) / 1000;
+                  const speed = e.loaded / elapsedSeconds; // bytes per second
+                  const remainingBytes = e.total - e.loaded;
+                  const remainingSeconds = speed > 0 ? remainingBytes / speed : Infinity;
+                  
+                  setUploadProgress({
+                      percentage,
+                      loaded: e.loaded,
+                      total: e.total,
+                      remaining: remainingSeconds === Infinity ? '...' : Math.round(remainingSeconds).toString(),
+                  });
               }
-          } catch (error: any) {
-              setStatus({ type: 'error', text: error.message });
-          }
-      });
+          });
 
-      xhr.addEventListener('error', () => {
-          setIsLoading(prev => ({ ...prev, uploading: false }));
-          setUploadProgress(null);
-          setStatus({ type: 'error', text: 'خطای شبکه در هنگام آپلود رخ داد.' });
-          if (fileInputRef.current) fileInputRef.current.value = "";
-      });
-      
-      xhr.addEventListener('abort', () => {
-          setIsLoading(prev => ({ ...prev, uploading: false }));
-          setUploadProgress(null);
-          setStatus({ type: 'info', text: 'آپلود لغو شد.' });
-          if (fileInputRef.current) fileInputRef.current.value = "";
-      });
+          xhr.addEventListener('load', () => {
+              setIsLoading(prev => ({ ...prev, uploading: false }));
+              setUploadProgress(null);
+              if (fileInputRef.current) fileInputRef.current.value = "";
 
-      xhr.open('POST', `${API_BASE_URL}/api/upload_file`, true);
-      xhr.send(formData);
+              try {
+                  if (xhr.status >= 200 && xhr.status < 300) {
+                      const data = JSON.parse(xhr.responseText);
+                      if (data.success) {
+                          setStatus({ type: 'success', text: data.message });
+                          fetchFiles();
+                      } else {
+                          throw new Error(data.message || 'خطا در آپلود فایل.');
+                      }
+                  } else if (xhr.status >= 500 && urlIndex === 0) {
+                      console.warn(`Upload to ${API_URLS[0]} failed with status ${xhr.status}. Trying fallback.`);
+                      performUpload(1);
+                  } else {
+                      const data = JSON.parse(xhr.responseText);
+                      throw new Error(data.message || `خطای سرور: ${xhr.status}`);
+                  }
+              } catch (error: any) {
+                  setStatus({ type: 'error', text: error.message });
+              }
+          });
+
+          xhr.addEventListener('error', () => {
+              if (urlIndex === 0) {
+                  console.warn(`Upload to ${API_URLS[0]} failed. Trying fallback.`);
+                  performUpload(1);
+              } else {
+                  setIsLoading(prev => ({ ...prev, uploading: false }));
+                  setUploadProgress(null);
+                  setStatus({ type: 'error', text: 'خطای شبکه در هنگام آپلود رخ داد.' });
+                  if (fileInputRef.current) fileInputRef.current.value = "";
+              }
+          });
+          
+          xhr.addEventListener('abort', () => {
+              setIsLoading(prev => ({ ...prev, uploading: false }));
+              setUploadProgress(null);
+              setStatus({ type: 'info', text: 'آپلود لغو شد.' });
+              if (fileInputRef.current) fileInputRef.current.value = "";
+          });
+
+          xhr.open('POST', `${API_URLS[urlIndex]}/api/upload_file`, true);
+          xhr.send(formData);
+      };
+
+      performUpload(0);
   };
 
   const handleDeleteFile = async (filename: string, type: 'photo' | 'reel') => {
@@ -209,7 +241,7 @@ const ContentPublisher: React.FC<ContentPublisherProps> = ({ isRateLimited }) =>
       setStatus(null);
 
       try {
-          const response = await fetch(`${API_BASE_URL}/api/delete_file`, {
+          const response = await fetchWithFailover(`/api/delete_file`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ filename, type }),
@@ -236,7 +268,7 @@ const ContentPublisher: React.FC<ContentPublisherProps> = ({ isRateLimited }) =>
       setIsLoading(prev => ({ ...prev, posting: true }));
       setStatus(null);
       try {
-        const response = await fetch(`${API_BASE_URL}/api/post_media`, {
+        const response = await fetchWithFailover(`/api/post_media`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ filename: selectedFile.name, type: selectedFile.type, caption }),
@@ -258,7 +290,7 @@ const ContentPublisher: React.FC<ContentPublisherProps> = ({ isRateLimited }) =>
     setIsLoading(prev => ({ ...prev, generatingCaption: true }));
     setStatus(null);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/generate_caption`, {
+      const response = await fetchWithFailover(`/api/generate_caption`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_dm: false }),
@@ -289,9 +321,9 @@ const ContentPublisher: React.FC<ContentPublisherProps> = ({ isRateLimited }) =>
             <div className="flex flex-col h-full">
               <div className="relative aspect-square rounded-lg overflow-hidden group mb-4 shadow-lg shadow-cyan-500/10">
                 {selectedFile.type === 'photo' ? (
-                  <img src={`${API_BASE_URL}/${PHOTO_FOLDER}/${selectedFile.name}`} alt={selectedFile.name} className="w-full h-full object-cover" />
+                  <img src={`${API_URLS[0]}/${PHOTO_FOLDER}/${selectedFile.name}`} onError={(e) => { const target = e.target as HTMLImageElement; if(target.src.startsWith(API_URLS[0])) target.src = `${API_URLS[1]}/${PHOTO_FOLDER}/${selectedFile.name}` }} alt={selectedFile.name} className="w-full h-full object-cover" />
                 ) : (
-                  <video src={`${API_BASE_URL}/${REELS_FOLDER}/${selectedFile.name}`} className="w-full h-full object-cover" controls />
+                  <video src={`${API_URLS[0]}/${REELS_FOLDER}/${selectedFile.name}`} onError={(e) => { const target = e.target as HTMLVideoElement; if(target.src.startsWith(API_URLS[0])) target.src = `${API_URLS[1]}/${REELS_FOLDER}/${selectedFile.name}` }} className="w-full h-full object-cover" controls />
                 )}
                 <button onClick={() => setSelectedFile(null)} className="absolute top-2 right-2 p-1.5 bg-black/60 text-white rounded-full hover:bg-black/80 transition-transform transform hover:scale-110">
                     <XCircle size={22} />

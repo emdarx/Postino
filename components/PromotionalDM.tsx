@@ -7,6 +7,23 @@ interface PromotionalDMProps {
   isRateLimited: boolean;
 }
 
+const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
+
+const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
+    let errorForFallback: any;
+    try {
+        const response = await fetch(`${API_URLS[0]}${path}`, options);
+        if (response.status < 500) {
+            return response;
+        }
+        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
+    } catch (error) {
+        errorForFallback = error;
+    }
+    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
+    return fetch(`${API_URLS[1]}${path}`, options);
+};
+
 const securityTips = [
     "برای جلوگیری از شناسایی شدن به عنوان اسپم، متن پیام خود را هر چند وقت یکبار تغییر دهید.",
     "بین کمپین‌های ارسال دایرکت، به حساب خود چند ساعت استراحت دهید تا فعالیت شما طبیعی به نظر برسد.",
@@ -97,7 +114,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
     // Check initial status on mount
     const checkInitialStatus = async () => {
         try {
-            const response = await fetch('http://127.0.0.1:5000/api/dm_status');
+            const response = await fetchWithFailover('/api/dm_status');
             const data = await response.json();
             if (data.running) {
                 setIsSending(true);
@@ -145,7 +162,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
 
     const fetchStatus = async () => {
         try {
-            const response = await fetch('http://127.0.0.1:5000/api/dm_status');
+            const response = await fetchWithFailover('/api/dm_status');
             const data = await response.json();
             
             if (response.ok && data.running) {
@@ -183,7 +200,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
     setIsGenerating(true);
     setStatus(null);
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/generate_caption', {
+      const response = await fetchWithFailover('/api/generate_caption', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_dm: true }),
@@ -212,7 +229,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
     setStatus(null);
 
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/send_dm', {
+      const response = await fetchWithFailover('/api/send_dm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, target }),
@@ -235,7 +252,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
     setIsSending(false); 
     
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/cancel_task', {
+      const response = await fetchWithFailover('/api/cancel_task', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ task: 'dm' }),

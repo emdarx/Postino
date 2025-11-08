@@ -5,6 +5,24 @@ interface LoginPageProps {
   onLogin: () => void;
 }
 
+const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
+
+const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
+    let errorForFallback: any;
+    try {
+        const response = await fetch(`${API_URLS[0]}${path}`, options);
+        if (response.status < 500) {
+            return response;
+        }
+        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
+    } catch (error) {
+        errorForFallback = error;
+    }
+    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
+    return fetch(`${API_URLS[1]}${path}`, options);
+};
+
+
 const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -23,7 +41,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
     setIsCaptchaLoading(true);
     setError(null);
     try {
-      const response = await fetch('https://amirhmz.pythonanywhere.com/api/captcha');
+      const response = await fetchWithFailover('/api/captcha');
       const data = await response.json();
       if (response.ok) {
         setCaptchaId(data.id);
@@ -59,7 +77,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
     }
 
     try {
-        const response = await fetch('https://amirhmz.pythonanywhere.com/api/login', {
+        const response = await fetchWithFailover('/api/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
