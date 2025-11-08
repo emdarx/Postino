@@ -11,7 +11,7 @@ const App: React.FC = () => {
 
   const updateStatus = useCallback(async () => {
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/stats');
+      const response = await fetch('https://amirhmz.pythonanywhere.com/api/stats');
       const data = await response.json();
 
       if (data.rate_limited) {
