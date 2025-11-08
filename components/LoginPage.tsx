@@ -23,7 +23,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
     setIsCaptchaLoading(true);
     setError(null);
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/captcha');
+      const response = await fetch('https://amirhmz.pythonanywhere.com/api/captcha');
       const data = await response.json();
       if (response.ok) {
         setCaptchaId(data.id);
@@ -59,7 +59,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
     }
 
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/login', {
+        const response = await fetch('https://amirhmz.pythonanywhere.com/api/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
