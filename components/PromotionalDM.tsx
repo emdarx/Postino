@@ -1,28 +1,15 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { Sparkles, Send, Loader2, CheckCircle, AlertTriangle, Info, Bot, Users, MailWarning, XCircle, Timer, ShieldOff } from 'lucide-react';
 
+const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const API_BASE_URL = isLocal ? 'http://127.0.0.1:5000' : 'https://amirhmz.pythonanywhere.com';
+
 type DMTarget = 'smart_engagers' | 'random_contacts';
 
 interface PromotionalDMProps {
   isRateLimited: boolean;
+  onInteraction: () => void;
 }
-
-const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
-
-const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
-    let errorForFallback: any;
-    try {
-        const response = await fetch(`${API_URLS[0]}${path}`, options);
-        if (response.status < 500) {
-            return response;
-        }
-        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
-    } catch (error) {
-        errorForFallback = error;
-    }
-    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
-    return fetch(`${API_URLS[1]}${path}`, options);
-};
 
 const securityTips = [
     "برای جلوگیری از شناسایی شدن به عنوان اسپم، متن پیام خود را هر چند وقت یکبار تغییر دهید.",
@@ -98,7 +85,7 @@ const DMStatusCard: React.FC<{ stats: { sent: number; failed: number; elapsed: s
 );
 
 
-const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
+const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited, onInteraction }) => {
   const [message, setMessage] = useState('');
   const [target, setTarget] = useState<DMTarget>('smart_engagers');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -111,10 +98,9 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
 
 
   useEffect(() => {
-    // Check initial status on mount
     const checkInitialStatus = async () => {
         try {
-            const response = await fetchWithFailover('/api/dm_status');
+            const response = await fetch(`${API_BASE_URL}/api/dm_status`);
             const data = await response.json();
             if (data.running) {
                 setIsSending(true);
@@ -162,7 +148,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
 
     const fetchStatus = async () => {
         try {
-            const response = await fetchWithFailover('/api/dm_status');
+            const response = await fetch(`${API_BASE_URL}/api/dm_status`);
             const data = await response.json();
             
             if (response.ok && data.running) {
@@ -182,6 +168,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
                 if(data.sent > 0 || data.failed > 0) {
                     setStatus({ type: 'info', text: `عملیات متوقف شد. ${data.sent} پیام موفق و ${data.failed} ناموفق بود.` });
                 }
+                onInteraction();
             }
         } catch (error) {
             console.error("Failed to fetch DM status:", error);
@@ -190,17 +177,17 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
         }
     };
 
-    const intervalId = setInterval(fetchStatus, 3000); // Poll every 3 seconds
+    const intervalId = setInterval(fetchStatus, 3000);
 
     return () => clearInterval(intervalId);
-  }, [isSending]);
+  }, [isSending, onInteraction]);
 
 
   const generateMessage = useCallback(async () => {
     setIsGenerating(true);
     setStatus(null);
     try {
-      const response = await fetchWithFailover('/api/generate_caption', {
+      const response = await fetch(`${API_BASE_URL}/api/generate_caption`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_dm: true }),
@@ -229,7 +216,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
     setStatus(null);
 
     try {
-      const response = await fetchWithFailover('/api/send_dm', {
+      const response = await fetch(`${API_BASE_URL}/api/send_dm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, target }),
@@ -239,6 +226,7 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
         throw new Error(data.message || 'خطا در شروع عملیات.');
       }
       setStatus({ type: 'info', text: data.message });
+      onInteraction();
     } catch (error: any) {
         setStatus({ type: 'error', text: error.message });
         setIsSending(false);
@@ -248,11 +236,9 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
   const handleCancel = async () => {
     setIsCancelling(true);
     setStatus(null);
-
-    setIsSending(false); 
     
     try {
-      const response = await fetchWithFailover('/api/cancel_task', {
+      const response = await fetch(`${API_BASE_URL}/api/cancel_task`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ task: 'dm' }),
@@ -263,6 +249,8 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
         setStatus({ type: 'error', text: data.message || 'خطا در ارسال درخواست لغو' });
       } else {
         setStatus({ type: 'info', text: 'درخواست لغو ارسال شد. عملیات در پس‌زمینه متوقف خواهد شد.' });
+        setIsSending(false); 
+        onInteraction();
       }
 
     } catch (error: any) {
@@ -363,10 +351,10 @@ const PromotionalDM: React.FC<PromotionalDMProps> = ({ isRateLimited }) => {
       </div>
       
       {status && (
-         <div className={`absolute bottom-0 left-0 right-0 p-3 text-sm font-semibold text-center border-t border-gray-200 dark:border-white/10 flex items-center justify-center gap-2 ${
-            status.type === 'success' ? 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-300' :
-            status.type === 'error' ? 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-300' :
-            'bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300'
+         <div className={`absolute bottom-0 left-0 right-0 p-3 text-sm font-semibold text-center flex items-center justify-center gap-2 text-white ${
+            status.type === 'success' ? 'bg-green-500' :
+            status.type === 'error' ? 'bg-red-500' :
+            'bg-blue-500'
         }`}>
             {status.type === 'success' && <CheckCircle size={18} />}
             {status.type === 'error' && <AlertTriangle size={18} />}

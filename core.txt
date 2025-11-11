@@ -15,6 +15,9 @@ from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired, LoginRequired, ClientError, UserNotFound, PrivateError
 from dotenv import load_dotenv
 
+GEMINI_API_KEY = "AIzaSyDE2YOvRsKyH9XIKq183L8sOTKv4Yla7BE"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 load_dotenv()
 
@@ -39,9 +42,6 @@ background_tasks = {
         "status": { "running": False, "liked": 0, "commented": 0, "start_time": None, "message": "" }
     }
 }
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your_gemini_api_key_here")
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 SETTINGS_FILE = "settings.json"
 SESSION_FILE = "session.json"

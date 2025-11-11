@@ -1,28 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { Bot, Compass, Users, Loader2, CheckCircle, AlertTriangle, Info, XCircle, Timer, ThumbsUp, MessageSquare } from 'lucide-react';
 
+const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const API_BASE_URL = isLocal ? 'http://127.0.0.1:5000' : 'https://amirhmz.pythonanywhere.com';
+
 type EngageTarget = 'discover' | 'followers';
 
 interface SmartInteractionProps {
   isRateLimited: boolean;
+  onInteraction: () => void;
 }
-
-const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
-
-const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
-    let errorForFallback: any;
-    try {
-        const response = await fetch(`${API_URLS[0]}${path}`, options);
-        if (response.status < 500) {
-            return response;
-        }
-        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
-    } catch (error) {
-        errorForFallback = error;
-    }
-    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
-    return fetch(`${API_URLS[1]}${path}`, options);
-};
 
 const securityTips = [
     "هنگامی که ربات فعال است، وارد اکانت اینستاگرام خود از دستگاه دیگری نشوید تا از بروز اختلال جلوگیری کنید.",
@@ -98,7 +85,7 @@ const InteractionStatusCard: React.FC<{ stats: { liked: number; commented: numbe
     </div>
 );
 
-const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) => {
+const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited, onInteraction }) => {
   const [target, setTarget] = useState<EngageTarget>('discover');
   const [isEngaging, setIsEngaging] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -108,10 +95,9 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
   const [randomTip, setRandomTip] = useState('');
 
   useEffect(() => {
-    // Check initial status on mount
     const checkInitialStatus = async () => {
         try {
-            const response = await fetchWithFailover('/api/interaction_status');
+            const response = await fetch(`${API_BASE_URL}/api/interaction_status`);
             const data = await response.json();
             if (data.running) {
                 setIsEngaging(true);
@@ -127,7 +113,7 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
     if (status) {
       const timer = setTimeout(() => {
         setStatus(null);
-      }, 5000); // Hide after 5 seconds
+      }, 5000);
 
       return () => clearTimeout(timer);
     }
@@ -137,18 +123,15 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
     let tipInterval: number | undefined;
 
     if (isEngaging) {
-        // Set an initial tip immediately
         setRandomTip(securityTips[Math.floor(Math.random() * securityTips.length)]);
         setShowTip(true);
 
-        // Start an interval to change the tip every 15 seconds
         tipInterval = window.setInterval(() => {
             setRandomTip(securityTips[Math.floor(Math.random() * securityTips.length)]);
-            setShowTip(true); // Re-show the banner with the new tip
-        }, 60000); // 15 seconds
+            setShowTip(true);
+        }, 60000);
     }
 
-    // Cleanup function to clear the interval when the component unmounts or isEngaging becomes false
     return () => {
         if (tipInterval) {
             clearInterval(tipInterval);
@@ -165,7 +148,7 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
 
     const fetchStatus = async () => {
         try {
-            const response = await fetchWithFailover('/api/interaction_status');
+            const response = await fetch(`${API_BASE_URL}/api/interaction_status`);
             const data = await response.json();
             
             if (response.ok && data.running) {
@@ -183,6 +166,7 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
             } else {
                 setIsEngaging(false);
                 setStatus({ type: 'info', text: data.message || 'عملیات تعامل هوشمند متوقف شد.' });
+                onInteraction();
             }
         } catch (error) {
             console.error("Failed to fetch interaction status:", error);
@@ -191,18 +175,18 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
         }
     };
 
-    const intervalId = setInterval(fetchStatus, 3000); // Poll every 3 seconds
+    const intervalId = setInterval(fetchStatus, 3000);
 
     return () => clearInterval(intervalId);
-  }, [isEngaging]);
+  }, [isEngaging, onInteraction]);
 
 
   const handleEngage = async () => {
-    setIsEngaging(true); // Optimistically set to engaging
+    setIsEngaging(true);
     setStatus(null);
 
     try {
-      const response = await fetchWithFailover('/api/auto_engage', {
+      const response = await fetch(`${API_BASE_URL}/api/auto_engage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target }),
@@ -213,21 +197,19 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
         throw new Error(data.message || 'خطا در شروع تعامل.');
       }
       setStatus({ type: 'info', text: data.message });
+      onInteraction();
     } catch (error: any) {
       setStatus({ type: 'error', text: error.message });
-      setIsEngaging(false); // Revert if start failed
+      setIsEngaging(false);
     }
   };
 
   const handleCancel = async () => {
     setIsCancelling(true);
     setStatus(null);
-
-    // Immediately revert the UI to the 'idle' state, per user request.
-    setIsEngaging(false); 
     
     try {
-      const response = await fetchWithFailover('/api/cancel_task', {
+      const response = await fetch(`${API_BASE_URL}/api/cancel_task`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ task: 'interaction' }),
@@ -238,6 +220,8 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
         setStatus({ type: 'error', text: data.message || 'خطا در ارسال درخواست لغو' });
       } else {
         setStatus({ type: 'info', text: 'درخواست لغو ارسال شد. عملیات در پس‌زمینه متوقف خواهد شد.' });
+        setIsEngaging(false); 
+        onInteraction();
       }
 
     } catch (error: any) {
@@ -316,10 +300,10 @@ const SmartInteraction: React.FC<SmartInteractionProps> = ({ isRateLimited }) =>
       </div>
       
       {status && (
-         <div className={`absolute bottom-0 left-0 right-0 p-3 text-sm font-semibold text-center border-t border-gray-200 dark:border-white/10 flex items-center justify-center gap-2 ${
-            status.type === 'success' ? 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-300' :
-            status.type === 'error' ? 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-300' :
-            'bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300'
+         <div className={`absolute bottom-0 left-0 right-0 p-3 text-sm font-semibold text-center flex items-center justify-center gap-2 text-white ${
+            status.type === 'success' ? 'bg-green-500' :
+            status.type === 'error' ? 'bg-red-500' :
+            'bg-blue-500'
         }`}>
             {status.type === 'success' && <CheckCircle size={18} />}
             {status.type === 'error' && <AlertTriangle size={18} />}

@@ -1,27 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldCheck, LogIn, RefreshCw, Eye, EyeOff } from 'lucide-react';
 
+const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const API_BASE_URL = isLocal ? 'http://127.0.0.1:5000' : 'https://amirhmz.pythonanywhere.com';
+
 interface LoginPageProps {
   onLogin: () => void;
 }
-
-const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
-
-const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
-    let errorForFallback: any;
-    try {
-        const response = await fetch(`${API_URLS[0]}${path}`, options);
-        if (response.status < 500) {
-            return response;
-        }
-        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
-    } catch (error) {
-        errorForFallback = error;
-    }
-    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
-    return fetch(`${API_URLS[1]}${path}`, options);
-};
-
 
 const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const [username, setUsername] = useState('');
@@ -41,7 +26,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
     setIsCaptchaLoading(true);
     setError(null);
     try {
-      const response = await fetchWithFailover('/api/captcha');
+      const response = await fetch(`${API_BASE_URL}/api/captcha`);
       const data = await response.json();
       if (response.ok) {
         setCaptchaId(data.id);
@@ -77,7 +62,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
     }
 
     try {
-        const response = await fetchWithFailover('/api/login', {
+        const response = await fetch(`${API_BASE_URL}/api/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -86,7 +71,6 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
         const data = await response.json();
 
         if (!response.ok) {
-            // Always refresh captcha on login errors, as it's likely invalid after one attempt.
             if (data.message && data.message.toLowerCase().includes('captcha')) {
                 fetchCaptcha();
                 setCaptchaSolution('');
@@ -94,18 +78,17 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
 
             let errorMessage = data.message || 'خطای ناشناخته در ورود.';
 
-            // Provide more specific, user-friendly messages based on status codes.
             switch (response.status) {
-                case 401: // LoginRequired
+                case 401:
                     errorMessage = "نام کاربری یا رمز عبور اشتباه است. لطفاً دوباره بررسی کنید.";
                     break;
-                case 403: // Action Blocked / "feedback_required"
+                case 403:
                     errorMessage = data.message || "اکانت شما توسط اینستاگرام محدود شده است. لطفاً ۲۴ ساعت صبر کرده و دوباره تلاش کنید.";
                     break;
-                case 429: // Rate limited
+                case 429:
                     errorMessage = "تعداد تلاش‌ها بیش از حد مجاز است. لطفاً چند دقیقه صبر کرده و دوباره امتحان کنید.";
                     break;
-                case 400: // General client errors (like checkpoint, bad captcha)
+                case 400:
                     if (data.message && data.message.includes('چالش امنیتی')) {
                         errorMessage = "ورود مشکوک شناسایی شد. لطفاً اپلیکیشن اینستاگرام یا ایمیل خود را برای تایید هویت بررسی کرده و سپس مجدداً وارد شوید.";
                     } else if (data.message && data.message.toLowerCase().includes('captcha')) {
@@ -124,11 +107,9 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
             setChallengeRequired(true);
             setError("کد تایید دو مرحله‌ای نیاز است. لطفاً کد را وارد کرده و دوباره تلاش کنید.");
         } else {
-             // Fallback for unexpected successful responses without a success flag
             throw new Error(data.message || 'یک خطای غیرمنتظره رخ داد.');
         }
     } catch (err: any) {
-        // Handle network errors specifically
         if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
             setError('امکان برقراری ارتباط با سرور وجود ندارد. لطفاً از اتصال اینترنت و فعال بودن سرور اطمینان حاصل کنید.');
         } else {
@@ -145,7 +126,6 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
         <div className="w-full max-w-4xl flex flex-col md:flex-row rounded-2xl shadow-2xl shadow-cyan-500/20 overflow-hidden border border-gray-300 dark:border-white/20">
-            {/* Form Panel */}
             <div className="w-full md:w-1/2 bg-white/80 dark:bg-black/30 backdrop-blur-xl p-10">
                 <form
                     onSubmit={handleSubmit}
@@ -252,7 +232,6 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
                 </form>
             </div>
             
-            {/* Logo Panel */}
             <div className="hidden md:flex w-1/2 bg-white items-center justify-center p-12">
                 <img 
                     src={logoUrl} 

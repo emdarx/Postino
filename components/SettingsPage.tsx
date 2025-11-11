@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Save, Loader2, CheckCircle, AlertTriangle, Info } from 'lucide-react';
 
+const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const API_BASE_URL = isLocal ? 'http://127.0.0.1:5000' : 'https://amirhmz.pythonanywhere.com';
+
 interface Settings {
     caption_prompt: string;
     dm_prompt: string;
@@ -11,23 +14,6 @@ interface Settings {
 interface SettingsPageProps {
   isRateLimited: boolean;
 }
-
-const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
-
-const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
-    let errorForFallback: any;
-    try {
-        const response = await fetch(`${API_URLS[0]}${path}`, options);
-        if (response.status < 500) {
-            return response;
-        }
-        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
-    } catch (error) {
-        errorForFallback = error;
-    }
-    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
-    return fetch(`${API_URLS[1]}${path}`, options);
-};
 
 const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
     const [settings, setSettings] = useState<Settings>({
@@ -44,7 +30,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
         setIsLoading(true);
         setStatus(null);
         try {
-            const response = await fetchWithFailover('/api/settings');
+            const response = await fetch(`${API_BASE_URL}/api/settings`);
             const data = await response.json();
             if (!response.ok) throw new Error(data.message || 'خطا در دریافت تنظیمات.');
             setSettings(data);
@@ -76,7 +62,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
                 interaction_comments: settings.interaction_comments.filter(c => c.trim() !== ''),
             };
 
-            const response = await fetchWithFailover('/api/settings', {
+            const response = await fetch(`${API_BASE_URL}/api/settings`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
@@ -124,7 +110,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
                 </div>
 
                 <div className="max-w-5xl mx-auto">
-                    {/* Prompt Settings */}
                     <h3 className="text-xl font-bold mb-4 text-gray-800 dark:text-white">تنظیمات پرامپت هوش مصنوعی</h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
                         <div>
@@ -155,7 +140,6 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
                         </div>
                     </div>
 
-                    {/* Bot Content Settings */}
                     <h3 className="text-xl font-bold mb-4 mt-8 text-gray-800 dark:text-white">محتوای ربات تعامل هوشمند</h3>
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                          <div>
@@ -188,10 +172,10 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ isRateLimited }) => {
                 </div>
             </div>
              {status && (
-                 <div className={`fixed bottom-4 right-4 z-50 p-4 rounded-lg shadow-xl flex items-center gap-3 text-sm font-semibold border ${
-                    status.type === 'success' ? 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-300 border-green-300 dark:border-green-500/30' :
-                    status.type === 'error' ? 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-300 border-red-300 dark:border-red-500/30' :
-                    'bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-500/30'
+                 <div className={`fixed bottom-4 right-4 z-50 p-4 rounded-lg shadow-xl flex items-center gap-3 text-sm font-semibold text-white ${
+                    status.type === 'success' ? 'bg-green-500' :
+                    status.type === 'error' ? 'bg-red-500' :
+                    'bg-blue-500'
                 }`}>
                     {status.type === 'success' && <CheckCircle size={18} />}
                     {status.type === 'error' && <AlertTriangle size={18} />}

@@ -6,6 +6,9 @@ import DashboardHome from './DashboardHome';
 import SettingsPage from './SettingsPage';
 import { LogOut, Send, Mail, UserCircle, Heart, Bot, LayoutDashboard, Settings, Menu, X, AlertOctagon, Moon } from 'lucide-react';
 
+const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const API_BASE_URL = isLocal ? 'http://127.0.0.1:5000' : 'https://amirhmz.pythonanywhere.com';
+
 interface DashboardPageProps {
   userInfo: any;
   onLogout: () => void;
@@ -15,23 +18,6 @@ interface DashboardPageProps {
 }
 
 type ActiveTab = 'dashboard' | 'publisher' | 'dm' | 'interaction' | 'settings';
-
-const API_URLS = ['https://amirhmz.pythonanywhere.com', 'http://127.0.0.1:5000'];
-
-const fetchWithFailover = async (path: string, options?: RequestInit): Promise<Response> => {
-    let errorForFallback: any;
-    try {
-        const response = await fetch(`${API_URLS[0]}${path}`, options);
-        if (response.status < 500) {
-            return response;
-        }
-        errorForFallback = new Error(`Server error on primary URL: ${response.status}`);
-    } catch (error) {
-        errorForFallback = error;
-    }
-    console.warn(`Primary API call to ${path} failed, trying fallback.`, errorForFallback);
-    return fetch(`${API_URLS[1]}${path}`, options);
-};
 
 const RateLimitBanner: React.FC<{ limitedUntil: number }> = ({ limitedUntil }) => {
     const [timeLeft, setTimeLeft] = useState('');
@@ -73,22 +59,14 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [cancellingTask, setCancellingTask] = useState<string | null>(null);
   const [avatarError, setAvatarError] = useState(false);
-  const [profilePicUrl, setProfilePicUrl] = useState(`${API_URLS[0]}/api/profile_pic`);
-
-  const handleAvatarError = () => {
-      if (profilePicUrl.startsWith(API_URLS[0])) {
-          setProfilePicUrl(`${API_URLS[1]}/api/profile_pic`);
-      } else {
-          setAvatarError(true);
-      }
-  };
+  const profilePicUrl = `${API_BASE_URL}/api/profile_pic`;
 
   const handleCancelTask = async (taskName: string) => {
     if (!window.confirm(`آیا از لغو عملیات '${taskName}' مطمئن هستید؟`)) return;
     
     setCancellingTask(taskName);
     try {
-        const response = await fetchWithFailover('/api/cancel_task', {
+        const response = await fetch(`${API_BASE_URL}/api/cancel_task`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ task: taskName }),
@@ -98,6 +76,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
             throw new Error(data.message || 'خطا در لغو عملیات.');
         }
         alert(data.message || 'درخواست لغو ارسال شد. عملیات به زودی متوقف خواهد شد.');
+        onInteraction();
     } catch (error: any) {
         console.error('Error cancelling task:', error);
         alert(`خطا در لغو عملیات: ${error.message}`);
@@ -108,10 +87,9 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
 
   const handleNavItemClick = (tab: ActiveTab) => {
     setActiveTab(tab);
-    if (window.innerWidth < 768) { // Corresponds to md breakpoint
+    if (window.innerWidth < 768) {
       setIsSidebarOpen(false);
     }
-    // onInteraction(); // This call was removed to reduce unnecessary API requests.
   };
 
   const NavItem = ({ tab, icon, label }: { tab: ActiveTab, icon: React.ReactNode, label: string }) => (
@@ -138,7 +116,6 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
 
   return (
     <div className="relative min-h-screen md:flex">
-      {/* Overlay for mobile */}
       {isSidebarOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/60 md:hidden"
@@ -147,7 +124,6 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
         ></div>
       )}
 
-      {/* Sidebar */}
       <aside
         className={`fixed inset-y-0 right-0 z-40 w-64 bg-gray-100/80 dark:bg-black/30 backdrop-blur-xl border-l border-gray-200 dark:border-white/10 p-4 flex flex-col transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${
           isSidebarOpen ? 'translate-x-0' : 'translate-x-full'
@@ -161,7 +137,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
                 <img 
                     src={profilePicUrl} 
                     alt={userInfo.username} 
-                    onError={handleAvatarError}
+                    onError={() => setAvatarError(true)}
                     className="w-10 h-10 rounded-full object-cover border-2 border-cyan-500" 
                 />
             )}
@@ -201,9 +177,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="flex-1 p-4 md:p-8 h-screen overflow-hidden">
-        {/* Mobile Header */}
         <header className="md:hidden flex justify-between items-center mb-4 p-2 bg-white/60 dark:bg-black/20 backdrop-blur-sm rounded-lg border border-gray-200 dark:border-white/10 sticky top-0 z-10">
            <h1 className="text-lg font-bold bg-gradient-to-r from-fuchsia-500 to-cyan-500 bg-clip-text text-transparent">
               {tabTitles[activeTab]}
@@ -222,10 +196,10 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ userInfo, onLogout, isRat
             <ContentPublisher isRateLimited={isRateLimited} />
           </div>
           <div style={{ display: activeTab === 'dm' ? 'block' : 'none' }} className="h-full">
-            <PromotionalDM isRateLimited={isRateLimited} />
+            <PromotionalDM isRateLimited={isRateLimited} onInteraction={onInteraction} />
           </div>
           <div style={{ display: activeTab === 'interaction' ? 'block' : 'none' }} className="h-full">
-            <SmartInteraction isRateLimited={isRateLimited} />
+            <SmartInteraction isRateLimited={isRateLimited} onInteraction={onInteraction} />
           </div>
           <div style={{ display: activeTab === 'settings' ? 'block' : 'none' }} className="h-full">
             <SettingsPage isRateLimited={isRateLimited} />
