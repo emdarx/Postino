@@ -15,7 +15,7 @@ from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired, LoginRequired, ClientError, UserNotFound, PrivateError
 from dotenv import load_dotenv
 
-GEMINI_API_KEY = "AIzaSyDE2YOvRsKyH9XIKq183L8sOTKv4Yla7BE"
+GEMINI_API_KEY = "AIzaSyDE2YKq183L8sOTKv4Yla7BE"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
